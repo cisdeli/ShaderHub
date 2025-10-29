@@ -93,7 +93,7 @@ uniform int   iFrame;      // frame count
 uniform vec4  iMouse;      // xy: current pos (pixels), zw: click pos (pixels) while held
 ```
 
-Controls:
+Controls (GLFW window must be focused):
 
 - `[` and `]` — switch shaders (when running with a directory)  
 - `R` — force reload  
