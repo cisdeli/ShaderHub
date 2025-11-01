@@ -231,6 +231,7 @@ int main(int argc, char **argv) {
 
     auto t0 = std::chrono::steady_clock::now();
     int frame = 0;
+    bool hotReloadEnabled = true;  // Toggle hot reload on/off
 
     auto bindUniforms = [&](int fbw, int fbh, float timeSec) {
         glUniform3f(locRes, (float)fbw, (float)fbh, 1.0f);
@@ -258,7 +259,8 @@ int main(int argc, char **argv) {
     };
 
     std::cout << "Loaded: " << currentFrag << "\n"
-              << "Controls: [ / ] switch shader, R reload, ESC quit\n";
+              << "Controls: [ / ] switch shader, R reload, H toggle hot-reload, ESC quit\n"
+              << "Hot-reload: ENABLED (press H to toggle)\n";
 
     while (!glfwWindowShouldClose(win)) {
         // Poll keys for switching / reload
@@ -286,12 +288,23 @@ int main(int argc, char **argv) {
             reloadProgram();
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
         }
+        
+        // Toggle hot reload
+        static bool hKeyWasPressed = false;
+        bool hKeyIsPressed = glfwGetKey(win, GLFW_KEY_H) == GLFW_PRESS;
+        if (hKeyIsPressed && !hKeyWasPressed) {
+            hotReloadEnabled = !hotReloadEnabled;
+            std::cout << "[Hot-reload] " << (hotReloadEnabled ? "ENABLED" : "DISABLED") << "\n";
+        }
+        hKeyWasPressed = hKeyIsPressed;
 
         // Hot reload if file changed on disk
-        auto curWrite = fs::last_write_time(currentFrag, ec);
-        if (!ec && curWrite != lastWrite) {
-            lastWrite = curWrite;
-            reloadProgram();
+        if (hotReloadEnabled) {
+            auto curWrite = fs::last_write_time(currentFrag, ec);
+            if (!ec && curWrite != lastWrite) {
+                lastWrite = curWrite;
+                reloadProgram();
+            }
         }
 
         int fbw, fbh;
