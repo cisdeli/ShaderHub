@@ -1,12 +1,13 @@
-// ShadersHub - Minimal Shadertoy-style runner with hot reload
+// ShaderHub - Minimal Shadertoy-style runner with hot reload
 // Build: GLFW + GLAD (OpenGL 3.3+)
 
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
 
 #include <algorithm>
-#include <thread>
+#include <map>
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +62,10 @@ static GLuint link(GLuint vs, GLuint fs) {
     glLinkProgram(p);
     GLint ok = 0;
     glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glDetachShader(p, vs);
+    glDetachShader(p, fs);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
     if (!ok) {
         GLint len = 0;
         glGetProgramiv(p, GL_INFO_LOG_LENGTH, &len);
@@ -71,10 +76,6 @@ static GLuint link(GLuint vs, GLuint fs) {
         glDeleteProgram(p);
         p = 0;
     }
-    glDetachShader(p, vs);
-    glDetachShader(p, fs);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
     return p;
 }
 
@@ -110,6 +111,51 @@ void main(){
     return wrapped;
 }
 
+// True if `name` appears as an actual uniform declaration, not merely as a use.
+// Checking for a bare mention would skip declaring a uniform the shader uses
+// but never declares, which is exactly the case the prelude exists to cover.
+static bool declaresUniform(const std::string &src, const std::string &name) {
+    auto isIdentChar = [](char c) { return std::isalnum((unsigned char)c) || c == '_'; };
+    for (size_t at = src.find(name); at != std::string::npos; at = src.find(name, at + 1)) {
+        if (at > 0 && isIdentChar(src[at - 1]))
+            continue;
+        const size_t end = at + name.size();
+        if (end < src.size() && isIdentChar(src[end]))
+            continue;
+        const size_t lineStart = src.rfind('\n', at);
+        const size_t from = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+        const size_t kw = src.find("uniform", from);
+        if (kw != std::string::npos && kw < at)
+            return true;
+    }
+    return false;
+}
+
+// Add a #version directive and any Shadertoy uniforms the file leaves out.
+// Declarations must follow #version, so they are spliced in after that line
+// when the shader already has one.
+static std::string injectPrelude(const std::string &src) {
+    std::string decls;
+    if (!declaresUniform(src, "iResolution"))
+        decls += "uniform vec3  iResolution;\n";
+    if (!declaresUniform(src, "iTime"))
+        decls += "uniform float iTime;\n";
+    if (!declaresUniform(src, "iFrame"))
+        decls += "uniform int   iFrame;\n";
+    if (!declaresUniform(src, "iMouse"))
+        decls += "uniform vec4  iMouse;\n";
+
+    const auto versionPos = src.find("#version");
+    if (versionPos == std::string::npos)
+        return "#version 330 core\n" + decls + src;
+    if (decls.empty())
+        return src;
+    const auto eol = src.find('\n', versionPos);
+    if (eol == std::string::npos)
+        return src + "\n" + decls;
+    return src.substr(0, eol + 1) + decls + src.substr(eol + 1);
+}
+
 // Create program from a fragment file, returns 0 if compile/link fails.
 static GLuint createProgramFromFragmentFile(const fs::path &fragPath) {
     std::string fragSource;
@@ -117,24 +163,30 @@ static GLuint createProgramFromFragmentFile(const fs::path &fragPath) {
         std::cerr << "[IO] Failed to read " << fragPath << "\n";
         return 0;
     }
-    // Ensure minimal header with uniforms in case they are missing
-    if (fragSource.find("iResolution") == std::string::npos ||
-        fragSource.find("iTime") == std::string::npos) {
-        const char *header = R"GLSL(
-#version 330 core
-uniform vec3  iResolution;
-uniform float iTime;
-uniform int   iFrame;
-uniform vec4  iMouse;
-)GLSL";
-        fragSource = std::string(header) + fragSource;
-    }
+    fragSource = injectPrelude(fragSource);
     fragSource = maybeWrapFragment(fragSource);
 
     GLuint vs = compile(GL_VERTEX_SHADER, VERT_SRC);
     GLuint fs = compile(GL_FRAGMENT_SHADER, fragSource.c_str());
     GLuint prog = link(vs, fs);
     return prog;
+}
+
+// ============ Input: fire once per physical key press ============
+// glfwGetKey is level-triggered, so polling it directly repeats every frame
+// while the key is held. `alt` lets one action watch two keys (e.g. [ and KP_4).
+static bool keyPressedOnce(GLFWwindow *win, int key, int alt = GLFW_KEY_UNKNOWN) {
+    static std::map<int, bool> wasDown;
+    bool edge = false;
+    for (int k : {key, alt}) {
+        if (k == GLFW_KEY_UNKNOWN)
+            continue;
+        const bool down = glfwGetKey(win, k) == GLFW_PRESS;
+        bool &prev = wasDown[k];
+        edge = edge || (down && !prev);
+        prev = down;
+    }
+    return edge;
 }
 
 // ============ File discovery (accepts files or a directory) ============
@@ -171,7 +223,7 @@ int main(int argc, char **argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow *win = glfwCreateWindow(960, 540, "ShadersHub", nullptr, nullptr);
+    GLFWwindow *win = glfwCreateWindow(960, 540, "ShaderHub", nullptr, nullptr);
     if (!win) {
         std::cerr << "Failed to create window\n";
         glfwTerminate();
@@ -264,39 +316,26 @@ int main(int argc, char **argv) {
 
     while (!glfwWindowShouldClose(win)) {
         // Poll keys for switching / reload
-        if (glfwGetKey(win, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS ||
-            glfwGetKey(win, GLFW_KEY_KP_4) == GLFW_PRESS) {
-            size_t next = (currentIndex + shaderFiles.size() - 1) % shaderFiles.size();
-            if (next != currentIndex) {
-                currentIndex = next;
-                currentFrag = shaderFiles[currentIndex];
-                lastWrite = fs::last_write_time(currentFrag, ec);
-                reloadProgram();
-            }
-        }
-        if (glfwGetKey(win, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS ||
-            glfwGetKey(win, GLFW_KEY_KP_6) == GLFW_PRESS) {
-            size_t next = (currentIndex + 1) % shaderFiles.size();
-            if (next != currentIndex) {
-                currentIndex = next;
-                currentFrag = shaderFiles[currentIndex];
-                lastWrite = fs::last_write_time(currentFrag, ec);
-                reloadProgram();
-            }
-        }
-        if (glfwGetKey(win, GLFW_KEY_R) == GLFW_PRESS) {
+        auto switchTo = [&](size_t next) {
+            if (next == currentIndex)
+                return;
+            currentIndex = next;
+            currentFrag = shaderFiles[currentIndex];
+            lastWrite = fs::last_write_time(currentFrag, ec);
             reloadProgram();
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        }
-        
+        };
+        if (keyPressedOnce(win, GLFW_KEY_LEFT_BRACKET, GLFW_KEY_KP_4))
+            switchTo((currentIndex + shaderFiles.size() - 1) % shaderFiles.size());
+        if (keyPressedOnce(win, GLFW_KEY_RIGHT_BRACKET, GLFW_KEY_KP_6))
+            switchTo((currentIndex + 1) % shaderFiles.size());
+        if (keyPressedOnce(win, GLFW_KEY_R))
+            reloadProgram();
+
         // Toggle hot reload
-        static bool hKeyWasPressed = false;
-        bool hKeyIsPressed = glfwGetKey(win, GLFW_KEY_H) == GLFW_PRESS;
-        if (hKeyIsPressed && !hKeyWasPressed) {
+        if (keyPressedOnce(win, GLFW_KEY_H)) {
             hotReloadEnabled = !hotReloadEnabled;
             std::cout << "[Hot-reload] " << (hotReloadEnabled ? "ENABLED" : "DISABLED") << "\n";
         }
-        hKeyWasPressed = hKeyIsPressed;
 
         // Hot reload if file changed on disk
         if (hotReloadEnabled) {
