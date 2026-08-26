@@ -19,9 +19,9 @@ void mainImage(out vec4 fc, in vec2 fragCoord)
         v += 0.25 * sin(10.0 * r * k - t * (1.5 + k) + 6.0 * sin(a * (2.0 + k)));
     }
     v = 0.5 + 0.5 * v;
-    vec3 col = 0.6 + 0.4 * cos(vec3(0.0, 9.0, 4.0) + 6.2831 * v + t*0.2);
+    vec3 col = 0.6 + 0.4 * cos(vec3(0.0, 2.0, 4.0) + 6.2831 * v + t*0.2);
     col *= 1.0 / (1.0 + 3.0 * r*r);
-    fc = vec4(col, 1.5);
+    fc = vec4(col, 1.0);
 }
 
 void main(){

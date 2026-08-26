@@ -66,13 +66,13 @@ cmake --build build -j
 Run with a directory to browse multiple shaders:
 
 ```bash
-./build/ShadersHub shaders/
+./build/ShaderHub shaders/
 ```
 
 Run a single shader file:
 
 ```bash
-./build/ShadersHub shaders/demo.frag
+./build/ShaderHub shaders/demo.frag
 ```
 
 ---
