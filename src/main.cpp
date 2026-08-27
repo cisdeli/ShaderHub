@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <map>
+#include <thread>
 
 #include <cctype>
 #include <chrono>
@@ -190,30 +191,108 @@ static bool keyPressedOnce(GLFWwindow *win, int key, int alt = GLFW_KEY_UNKNOWN)
 }
 
 // ============ File discovery (accepts files or a directory) ============
-static std::vector<fs::path> collectShaderFiles(const fs::path &input) {
+static bool hasShaderExtension(const fs::path &p) {
+    const auto ext = p.extension().string();
+    return ext == ".frag" || ext == ".glsl" || ext == ".fs";
+}
+
+static std::vector<fs::path> shadersInDirectory(const fs::path &dir) {
     std::vector<fs::path> out;
-    if (fs::is_regular_file(input)) {
-        out.push_back(input);
-        return out;
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(dir, ec);
+         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (it->is_regular_file() && hasShaderExtension(it->path()))
+            out.push_back(it->path());
     }
-    if (fs::is_directory(input)) {
-        for (auto &e : fs::directory_iterator(input)) {
-            if (!e.is_regular_file())
-                continue;
-            auto ext = e.path().extension().string();
-            if (ext == ".frag" || ext == ".glsl" || ext == ".fs")
-                out.push_back(e.path());
-        }
-        std::sort(out.begin(), out.end());
-    }
+    std::sort(out.begin(), out.end());
     return out;
+}
+
+// Given a directory, returns every shader in it starting at the first.
+// Given a file, returns that file's siblings and starts on the named file, so
+// that opening one shader still lets [ and ] page through the rest of the
+// folder. Falls back to the lone file when it has no shader siblings (an
+// unrecognised extension, say) so an explicit path always loads.
+static std::vector<fs::path> collectShaderFiles(const fs::path &input, size_t &startIndex) {
+    startIndex = 0;
+    if (fs::is_directory(input))
+        return shadersInDirectory(input);
+
+    if (fs::is_regular_file(input)) {
+        const fs::path dir = input.has_parent_path() ? input.parent_path() : fs::path(".");
+        std::vector<fs::path> siblings = shadersInDirectory(dir);
+        // All entries share a directory, so filenames are enough to identify
+        // the one that was named, without normalising "./" prefixes.
+        for (size_t i = 0; i < siblings.size(); ++i) {
+            if (siblings[i].filename() == input.filename()) {
+                startIndex = i;
+                return siblings;
+            }
+        }
+        return {input};
+    }
+    return {};
+}
+
+// ============ GPU selection ============
+// Under WSL2, Mesa defaults to llvmpipe -- a software rasterizer that runs the
+// fragment shader on the CPU. That is roughly 30x slower here: xorworld.frag at
+// 1080p measures 2.9 fps on llvmpipe vs 87 fps on the discrete GPU.
+//
+// When the WSL GPU passthrough device is present, opt into the d3d12 gallium
+// driver and prefer the discrete adapter. Both setenv calls pass overwrite=0, so
+// anything already in the environment wins and this stays a default, not a
+// policy. Mesa reads these when the context is created, which is after main()
+// starts, so setting them here works.
+static void preferHardwareGL() {
+    if (!fs::exists("/dev/dxg"))
+        return;
+    setenv("GALLIUM_DRIVER", "d3d12", 0);
+    // Mesa matches this against the adapter description; without it the
+    // integrated GPU is picked. Harmless if no adapter matches.
+    setenv("MESA_D3D12_DEFAULT_ADAPTER_NAME", "NVIDIA", 0);
+}
+
+// ============ Frame pacing ============
+// glfwSwapInterval(1) is only a request, and under WSLg it is ignored: the loop
+// measured ~674 fps on a trivial shader with vsync "on", identical to vsync off.
+// Redrawing hundreds of frames a second that the display never shows is pure
+// heat -- demo.frag alone held the GPU at 35% and 12W. So pace the loop here.
+//
+// The margin matters. Where vsync *is* honoured, glfwSwapBuffers already blocks
+// until the next refresh, so the frame has consumed its whole budget by the time
+// we get here and we sleep for nothing. Undershooting the deadline slightly
+// means we never add a second wait on top of the driver's, which would beat
+// against the refresh and halve the rate.
+static void limitFrameRate(std::chrono::steady_clock::time_point frameStart, int targetFps) {
+    if (targetFps <= 0)
+        return;
+    const auto budget = std::chrono::duration<double>(1.0 / targetFps);
+    const auto margin = std::chrono::duration<double>(0.001);
+    const auto deadline = frameStart +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(budget - margin);
+    if (std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_until(deadline);
 }
 
 // ============ Main ============
 int main(int argc, char **argv) {
     fs::path target = "shaders/demo.frag";
-    if (argc > 1)
-        target = fs::path(argv[1]);
+    int targetFps = 60;
+    bool sawTarget = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--fps" && i + 1 < argc) {
+            targetFps = std::atoi(argv[++i]);  // 0 or less uncaps the loop
+        } else if (!sawTarget) {
+            target = fs::path(arg);
+            sawTarget = true;
+        } else {
+            std::cerr << "[Args] Ignoring unexpected argument: " << arg << "\n";
+        }
+    }
+
+    preferHardwareGL();
 
     if (!glfwInit()) {
         std::cerr << "Failed to init GLFW\n";
@@ -230,12 +309,17 @@ int main(int argc, char **argv) {
         return 1;
     }
     glfwMakeContextCurrent(win);
-    glfwSwapInterval(1);
+    glfwSwapInterval(1);  // honoured on some drivers; limitFrameRate covers the rest
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to init GLAD\n";
         return 1;
     }
+
+    // Report the device: a silent fall back to software rendering is otherwise
+    // very easy to miss, and looks like a slow shader rather than a slow driver.
+    std::cout << "[GL] " << glGetString(GL_RENDERER) << "  |  "
+              << glGetString(GL_VERSION) << "\n";
 
     GLuint vao = 0;
     glGenVertexArrays(1, &vao);
@@ -257,12 +341,12 @@ int main(int argc, char **argv) {
     });
 
     // Shader file loading
-    auto shaderFiles = collectShaderFiles(target);
+    size_t currentIndex = 0;
+    auto shaderFiles = collectShaderFiles(target, currentIndex);
     if (shaderFiles.empty()) {
         std::cerr << "[IO] No shader files found in: " << target << "\n";
         return 1;
     }
-    size_t currentIndex = 0;
     fs::path currentFrag = shaderFiles[currentIndex];
     std::error_code ec;
     auto lastWrite = fs::last_write_time(currentFrag, ec);
@@ -304,17 +388,33 @@ int main(int argc, char **argv) {
             locTime = glGetUniformLocation(prog, "iTime");
             locFrame = glGetUniformLocation(prog, "iFrame");
             locMouse = glGetUniformLocation(prog, "iMouse");
-            std::cout << "[Reload] " << currentFrag.string() << "\n";
+            std::cout << "[Reload] " << currentFrag.string() << "  ("
+                      << (currentIndex + 1) << "/" << shaderFiles.size() << ")\n";
         } else {
             std::cerr << "[Reload] Keeping previous program due to errors.\n";
         }
     };
 
-    std::cout << "Loaded: " << currentFrag << "\n"
+    std::cout << "Loaded: " << currentFrag << "  (" << (currentIndex + 1) << "/"
+              << shaderFiles.size() << ")\n"
               << "Controls: [ / ] switch shader, R reload, H toggle hot-reload, ESC quit\n"
               << "Hot-reload: ENABLED (press H to toggle)\n";
+    if (shaderFiles.size() == 1)
+        std::cout << "[Note] Only one shader here, so [ and ] have nothing to switch to.\n";
+    std::cout << "Frame cap: " << (targetFps > 0 ? std::to_string(targetFps) + " fps" : "uncapped")
+              << "  (--fps N to change, --fps 0 to uncap)\n";
 
     while (!glfwWindowShouldClose(win)) {
+        const auto frameStart = std::chrono::steady_clock::now();
+
+        // Nothing is visible while minimised, so stop drawing entirely and block
+        // on events instead of spinning. The timeout keeps hot-reload responsive
+        // once the window comes back.
+        if (glfwGetWindowAttrib(win, GLFW_ICONIFIED)) {
+            glfwWaitEventsTimeout(0.25);
+            continue;
+        }
+
         // Poll keys for switching / reload
         auto switchTo = [&](size_t next) {
             if (next == currentIndex)
@@ -364,6 +464,8 @@ int main(int argc, char **argv) {
 
         if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)
             glfwSetWindowShouldClose(win, 1);
+
+        limitFrameRate(frameStart, targetFps);
     }
 
     glDeleteProgram(prog);
