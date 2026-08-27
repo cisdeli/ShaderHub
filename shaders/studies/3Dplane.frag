@@ -27,7 +27,7 @@ void mainImage(out vec4 fc, in vec2 fragCoord) {
     float dist = 0.0; // how far to the nearest surface
     for (int i = 0; i < 80; i++) {
         vec3 p = ro + rd * ds; // current position
-        dist g gap(p);
+        dist = map(p);   // distance to the nearest surface
         if (dist < 0.0001)
             break; // hit
         if (ds > 100.0)
