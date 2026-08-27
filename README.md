@@ -56,7 +56,7 @@ sudo apt install build-essential cmake libglfw3-dev xorg-dev
 git clone https://github.com/cisdeli/ShaderHub.git
 cd ShaderHub
 cmake -B build
-cmake --build build -j
+cmake --build build -j$(nproc)
 ```
 
 ---
@@ -74,6 +74,35 @@ Run a single shader file:
 ```bash
 ./build/ShaderHub shaders/demo.frag
 ```
+
+Naming a file opens straight to it but still loads the rest of its folder, so
+`[` and `]` page through the neighbours. The startup line shows your position:
+
+```
+Loaded: "shaders/xorworld.frag"  (4/4)
+```
+
+---
+
+## Frame rate
+
+The loop is capped at 60 fps. 
+
+```bash
+./build/ShaderHub shaders/ --fps 30   # lighter
+./build/ShaderHub shaders/ --fps 0    # uncapped, don't recommend
+```
+
+Rendering also stops entirely while the window is minimised.
+
+---
+
+## Performance note (WSL2)
+
+On startup ShaderHub prints the OpenGL device. If it reports `llvmpipe`, your
+shaders are running on the CPU. The runner opts into
+the `d3d12` hardware path automatically when `/dev/dxg` is present; force
+software rendering with `GALLIUM_DRIVER=llvmpipe` if you want to compare.
 
 ---
 
@@ -95,8 +124,9 @@ uniform vec4  iMouse;      // xy: current pos (pixels), zw: click pos (pixels) w
 
 Controls (GLFW window must be focused):
 
-- `[` and `]` — switch shaders (when running with a directory)  
+- `[` and `]` — switch shaders (cycles the folder, whether you passed a file or a directory)  
 - `R` — force reload  
+- `H` — toggle hot reload on/off  
 - `ESC` — quit
 
 ---
