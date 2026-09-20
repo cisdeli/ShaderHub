@@ -175,7 +175,7 @@ void mainImage(out vec4 fc, in vec2 fragCoord) {
         float NdotH = max(dot(N, halfVec), 0.0);
         float spec = pow(NdotH, 32.0); // exponent controls glossiness
 
-        col += vec3(1.0) * spec * 0.5; // white highlight, tweak intensity with 0.5
+        col += vec3(1.0) * spec * 0.5; 
     }
     fc = vec4(col, 1.0);
 }
