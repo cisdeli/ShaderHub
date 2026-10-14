@@ -29,12 +29,20 @@ const float ROUNDING = 0.1;
 const float BOUND_R = (SPACING + HALF) * 1.7320508 + 0.01;
 
 //Animation
-// R U R' U' six times so it loops
-const int SEQ_LEN = 24;
+// Scramble, hold, then the exact inverse to return to solved, then hold.
+//   U' L' U' F' R2 B' R F U B2 U B' L U' F U R F'
+const int SCRAMBLE_LEN = 18;
+const int SEQ_LEN = 36;
 const float TURN_SECONDS = 0.45;
-const int SEQ_AXIS[24] = int[24](0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1);
-const float SEQ_LAYER[24] = float[24](1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
-const float SEQ_TURNS[24] = float[24](-1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0);
+const float PAUSE = 5.0;
+// Timeline: scramble | hold | solve | hold, then repeat.
+const float T_SCRAMBLE_END = float(SCRAMBLE_LEN) * TURN_SECONDS;
+const float T_HOLD1_END = T_SCRAMBLE_END + PAUSE;
+const float T_SOLVE_END = T_HOLD1_END + float(SCRAMBLE_LEN) * TURN_SECONDS;
+const float T_CYCLE = T_SOLVE_END + PAUSE;
+const int SEQ_AXIS[36] = int[36](1, 0, 1, 2, 0, 2, 0, 2, 1, 2, 1, 2, 0, 1, 2, 1, 0, 2, 2, 0, 1, 2, 1, 0, 2, 1, 2, 1, 2, 0, 2, 0, 2, 1, 0, 1);
+const float SEQ_LAYER[36] = float[36](1.0, -1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, 1.0);
+const float SEQ_TURNS[36] = float[36](-1.0, -1.0, -1.0, 1.0, -2.0, -1.0, -1.0, -1.0, 1.0, 2.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 2.0, -1.0, 1.0, 1.0, 1.0, -2.0, -1.0, 1.0, 1.0, 1.0);
 int seq_step;
 int turn_axis;
 float turn_c, turn_s; // cos/sin of the current turn angle
@@ -42,13 +50,33 @@ vec3 m_lo, m_hi, s_lo, s_hi; // moving / still cell bounds
 //==
 
 void setup_turn() {
-    float phase = iTime / TURN_SECONDS;
-    seq_step = int(mod(floor(phase), float(SEQ_LEN)));
-    float t = fract(phase);
-    float e = t * t * (3.0 - 2.0 * t);
-    turn_axis = SEQ_AXIS[seq_step];
-    float layer = SEQ_LAYER[seq_step];
-    float a = e * SEQ_TURNS[seq_step] * 1.57079633;
+    float ct = mod(iTime, T_CYCLE);
+    float a = 0.0;
+    float layer = 1.0;
+    turn_axis = 0;
+
+    if (ct < T_SCRAMBLE_END) { // playing the scramble
+        float ph = ct / TURN_SECONDS;
+        seq_step = min(int(floor(ph)), SCRAMBLE_LEN - 1);
+        float t = fract(ph);
+        float e = t * t * (3.0 - 2.0 * t);
+        turn_axis = SEQ_AXIS[seq_step];
+        layer = SEQ_LAYER[seq_step];
+        a = e * SEQ_TURNS[seq_step] * 1.57079633;
+    } else if (ct < T_HOLD1_END) { // holding the scrambled cube
+        seq_step = SCRAMBLE_LEN;
+    } else if (ct < T_SOLVE_END) { // playing the inverse
+        float ph = (ct - T_HOLD1_END) / TURN_SECONDS;
+        seq_step = min(SCRAMBLE_LEN + int(floor(ph)), SEQ_LEN - 1);
+        float t = fract(ph);
+        float e = t * t * (3.0 - 2.0 * t);
+        turn_axis = SEQ_AXIS[seq_step];
+        layer = SEQ_LAYER[seq_step];
+        a = e * SEQ_TURNS[seq_step] * 1.57079633;
+    } else { // holding the solved cube
+        seq_step = SEQ_LEN;
+    }
+
     turn_c = cos(a);
     turn_s = sin(a);
 
@@ -133,16 +161,19 @@ vec3 sticker_color(vec3 cell, vec3 n) {
     for (int j = seq_step - 1; j >= 0; --j) {
         int ax = SEQ_AXIS[j];
         if (cell[ax] != SEQ_LAYER[j]) continue;
-        float s = -SEQ_TURNS[j];
-        if (ax == 0) {
-            cell.yz = rot90(cell.yz, s);
-            n.yz = rot90(n.yz, s);
-        } else if (ax == 1) {
-            cell.xz = rot90(cell.xz, s);
-            n.xz = rot90(n.xz, s);
-        } else {
-            cell.xy = rot90(cell.xy, s);
-            n.xy = rot90(n.xy, s);
+        float s = -sign(SEQ_TURNS[j]);
+        int reps = int(abs(SEQ_TURNS[j]) + 0.5); // 1 for a quarter turn, 2 for a half
+        for (int k = 0; k < reps; k++) {
+            if (ax == 0) {
+                cell.yz = rot90(cell.yz, s);
+                n.yz = rot90(n.yz, s);
+            } else if (ax == 1) {
+                cell.xz = rot90(cell.xz, s);
+                n.xz = rot90(n.xz, s);
+            } else {
+                cell.xy = rot90(cell.xy, s);
+                n.xy = rot90(n.xy, s);
+            }
         }
     }
 
