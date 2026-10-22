@@ -24,7 +24,6 @@ vec2 rotate(vec2 p, float a){
 
 
 void mainImage(out vec4 fc, in vec2 fragCoord) {
-    // Centred on 0.5, not 0: the rotate/offset below are calibrated for that.
     vec2 uv = (fragCoord - 0.5 * iResolution.xy) / min(iResolution.x, iResolution.y);
     float zoom = 1.0 + 0.5 * sin(iTime * 0.3);
     vec2 fit = 0.5 + uv / zoom;
